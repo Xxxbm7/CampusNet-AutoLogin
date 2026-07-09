@@ -1657,10 +1657,7 @@ namespace CampusNetWpf
         }
 
         private bool _logging;
-        private int _offlineCount = 0;
-        private const int OfflineThreshold = 2;
 
-        // 修复：增加连续失败计数阈值，避免单次误报触发无限重登
         private void RunDetection()
         {
             if (_logging)
@@ -1680,16 +1677,7 @@ namespace CampusNetWpf
                     connected = (bool)e.Result;
 
                 bool previous = _isConnected;
-
-                // 连续失败计数
-                if (!connected)
-                    _offlineCount++;
-                else
-                    _offlineCount = 0;
-
-                // 只有连续失败达到阈值，才确认断网
-                bool trulyOffline = (!connected && _offlineCount >= OfflineThreshold);
-                _isConnected = !trulyOffline;
+                _isConnected = connected;
 
                 if (!previous && connected && _autoHotspot)
                 {
@@ -1697,7 +1685,7 @@ namespace CampusNetWpf
                     ThreadPool.QueueUserWorkItem(_ => StartHotspot());
                 }
 
-                if (trulyOffline && _autoReconnect)
+                if (!connected && _autoReconnect)
                 {
                     AddLog("检测到断网!");
                     UpdateUIState();
@@ -1706,7 +1694,7 @@ namespace CampusNetWpf
 
                 UpdateUIState();
 
-                if (previous && trulyOffline)
+                if (previous && !connected)
                 {
                     if (_notifyIcon != null)
                     {
@@ -1785,7 +1773,6 @@ namespace CampusNetWpf
                 if (success)
                 {
                     _isConnected = true;
-                    _offlineCount = 0;
                     UpdateUIState();
                     AddLog("已连接!");
                 }
