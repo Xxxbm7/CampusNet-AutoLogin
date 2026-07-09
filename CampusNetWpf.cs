@@ -1562,30 +1562,38 @@ namespace CampusNetWpf
         // 访问 http://10.9.1.3/?isReback=1，提取 uid='...' 判断登录状态
         private bool Online()
         {
-            try
+            // 两次尝试，避免偶发网络抖动误判
+            for (int retry = 0; retry < 2; retry++)
             {
-                HttpWebRequest r = (HttpWebRequest)WebRequest.Create(
-                    string.Format("http://{0}/?isReback=1", _gateway));
-                r.Timeout = 5000;
-                using (HttpWebResponse x = (HttpWebResponse)r.GetResponse())
-                using (Stream s = x.GetResponseStream())
+                try
                 {
-                    byte[] bf = new byte[4096];
-                    int n = s.Read(bf, 0, 4096);
-                    string body = Encoding.UTF8.GetString(bf, 0, n);
-                    // uid='0' 或 uid='' 表示未登录，uid='账号' 表示已登录
-                    Match uidMatch = Regex.Match(body, "uid='([^']*)'");
-                    if (uidMatch.Success)
+                    HttpWebRequest r = (HttpWebRequest)WebRequest.Create(
+                        string.Format("http://{0}/?isReback=1", _gateway));
+                    r.Timeout = 5000;
+                    using (HttpWebResponse x = (HttpWebResponse)r.GetResponse())
+                    using (Stream s = x.GetResponseStream())
                     {
-                        string uid = uidMatch.Groups[1].Value;
-                        if (uid == "0" || uid == "")
-                            return false;
-                        return true;
+                        byte[] bf = new byte[4096];
+                        int n = s.Read(bf, 0, 4096);
+                        string body = Encoding.UTF8.GetString(bf, 0, n);
+                        Match uidMatch = Regex.Match(body, "uid='([^']*)'");
+                        if (uidMatch.Success)
+                        {
+                            string uid = uidMatch.Groups[1].Value;
+                            if (uid == "0" || uid == "")
+                                return false;
+                            return true;
+                        }
+                        return false;
                     }
-                    return false;
+                }
+                catch
+                {
+                    if (retry == 0)
+                        System.Threading.Thread.Sleep(1000);
                 }
             }
-            catch { return false; }
+            return false;
         }
 
         // 按 CampusNet(1).exe 反编译结果重写
@@ -1663,6 +1671,9 @@ namespace CampusNetWpf
 
         private void RunDetection()
         {
+            // 登录过程中不检测，避免假报警
+            if (_logging)
+                return;
             if (_detectWorker != null && _detectWorker.IsBusy)
                 return;
 
@@ -1686,7 +1697,6 @@ namespace CampusNetWpf
                     ThreadPool.QueueUserWorkItem(_ => StartHotspot());
                 }
 
-                // 按 CampusNet(1).exe 逻辑：检测到断网就登录
                 if (!connected && _autoReconnect)
                 {
                     AddLog("检测到断网!");
@@ -1697,7 +1707,6 @@ namespace CampusNetWpf
                 UpdateUIState();
                 if (previous && !connected)
                 {
-                    AddLog("[检测] 网络已断开");
                     if (_notifyIcon != null)
                     {
                         _notifyIcon.ShowBalloonTip(
