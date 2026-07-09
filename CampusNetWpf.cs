@@ -1558,25 +1558,51 @@ namespace CampusNetWpf
             _footerTime.Text = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
         }
 
-        // 网络检测：按 WinForm 源码逻辑
-        // 访问 detectportal.firefox.com/success.txt，能拿到 "success" 即在线
-        // 未登录时网关会劫持 HTTP 请求到登录页，返回 HTML 而非 "success"
+        // 网络检测：双保险 —— 外网连通 + 网关 uid 双重判断
+        // 任一方法判定在线即认为在线，避免单一方法偶发失败导致误报
         private bool Online()
         {
+            // 方法1：外网连通性（WinForm 源码方式）
             try
             {
                 HttpWebRequest r = (HttpWebRequest)WebRequest.Create(
                     "http://detectportal.firefox.com/success.txt");
-                r.Timeout = 5000;
+                r.Timeout = 3000;
                 using (HttpWebResponse x = (HttpWebResponse)r.GetResponse())
                 using (Stream s = x.GetResponseStream())
                 {
                     byte[] bf = new byte[64];
                     int n = s.Read(bf, 0, 64);
-                    return Encoding.ASCII.GetString(bf, 0, n).Trim() == "success";
+                    if (Encoding.ASCII.GetString(bf, 0, n).Trim() == "success")
+                        return true;
                 }
             }
-            catch { return false; }
+            catch { }
+
+            // 方法2：网关 uid 检测（CampusNet(1).exe 反编译方式）
+            try
+            {
+                HttpWebRequest r = (HttpWebRequest)WebRequest.Create(
+                    string.Format("http://{0}/?isReback=1", _gateway));
+                r.Timeout = 3000;
+                using (HttpWebResponse x = (HttpWebResponse)r.GetResponse())
+                using (Stream s = x.GetResponseStream())
+                {
+                    byte[] bf = new byte[4096];
+                    int n = s.Read(bf, 0, 4096);
+                    string body = Encoding.UTF8.GetString(bf, 0, n);
+                    Match uidMatch = Regex.Match(body, "uid='([^']*)'");
+                    if (uidMatch.Success)
+                    {
+                        string uid = uidMatch.Groups[1].Value;
+                        if (uid != "0" && uid != "")
+                            return true;
+                    }
+                }
+            }
+            catch { }
+
+            return false;
         }
 
         // 按 CampusNet(1).exe 反编译结果重写
