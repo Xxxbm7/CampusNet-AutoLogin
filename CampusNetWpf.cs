@@ -81,7 +81,7 @@ namespace CampusNetWpf
             {
                 if (string.IsNullOrEmpty(Username))
                     return "";
-                // 学号格式如 2330414026@zgyd，取 @ 前部分的最后两位数字
+                // 学号格式如 2023000001@zgyd，取 @ 前部分的最后两位数字
                 string id = Username.Split('@')[0];
                 if (id.Length <= 2)
                     return id;
