@@ -1558,42 +1558,25 @@ namespace CampusNetWpf
             _footerTime.Text = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
         }
 
-        // 网络检测：按 CampusNet(1).exe 反编译结果重写
-        // 访问 http://10.9.1.3/?isReback=1，提取 uid='...' 判断登录状态
+        // 网络检测：按 WinForm 源码逻辑
+        // 访问 detectportal.firefox.com/success.txt，能拿到 "success" 即在线
+        // 未登录时网关会劫持 HTTP 请求到登录页，返回 HTML 而非 "success"
         private bool Online()
         {
-            // 两次尝试，避免偶发网络抖动误判
-            for (int retry = 0; retry < 2; retry++)
+            try
             {
-                try
+                HttpWebRequest r = (HttpWebRequest)WebRequest.Create(
+                    "http://detectportal.firefox.com/success.txt");
+                r.Timeout = 5000;
+                using (HttpWebResponse x = (HttpWebResponse)r.GetResponse())
+                using (Stream s = x.GetResponseStream())
                 {
-                    HttpWebRequest r = (HttpWebRequest)WebRequest.Create(
-                        string.Format("http://{0}/?isReback=1", _gateway));
-                    r.Timeout = 5000;
-                    using (HttpWebResponse x = (HttpWebResponse)r.GetResponse())
-                    using (Stream s = x.GetResponseStream())
-                    {
-                        byte[] bf = new byte[4096];
-                        int n = s.Read(bf, 0, 4096);
-                        string body = Encoding.UTF8.GetString(bf, 0, n);
-                        Match uidMatch = Regex.Match(body, "uid='([^']*)'");
-                        if (uidMatch.Success)
-                        {
-                            string uid = uidMatch.Groups[1].Value;
-                            if (uid == "0" || uid == "")
-                                return false;
-                            return true;
-                        }
-                        return false;
-                    }
-                }
-                catch
-                {
-                    if (retry == 0)
-                        System.Threading.Thread.Sleep(1000);
+                    byte[] bf = new byte[64];
+                    int n = s.Read(bf, 0, 64);
+                    return Encoding.ASCII.GetString(bf, 0, n).Trim() == "success";
                 }
             }
-            return false;
+            catch { return false; }
         }
 
         // 按 CampusNet(1).exe 反编译结果重写
@@ -1671,7 +1654,7 @@ namespace CampusNetWpf
 
         private void RunDetection()
         {
-            // 登录过程中不检测，避免假报警
+            // 登录或冷却期间不检测，避免密集请求干扰网关 session
             if (_logging)
                 return;
             if (_detectWorker != null && _detectWorker.IsBusy)
