@@ -1,0 +1,19 @@
+# 编译产物
+CampusNet.exe
+*.exe
+
+# 个人数据
+accounts.txt
+settings.txt
+current.txt
+
+# 临时文件
+*.ps1
+*.jpg
+微信图片_*
+
+# IDE
+.vs/
+.vscode/
+*.suo
+*.user
