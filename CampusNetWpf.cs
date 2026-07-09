@@ -257,7 +257,7 @@ namespace CampusNetWpf
         private bool _autoReconnect = true;
         private bool _autoHotspot = false;
         private bool _autoStart = false;
-        private int _intervalSeconds = 3;
+        private int _intervalSeconds = 60;
         private string _gateway = DefaultGateway;
         private bool _allowClose = false;
         private List<Account> _accounts = new List<Account>();
@@ -1558,54 +1558,38 @@ namespace CampusNetWpf
             _footerTime.Text = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
         }
 
-        // 网络检测：双保险 —— 外网连通 + 网关 uid 双重判断
-        // 任一方法判定在线即认为在线，避免单一方法偶发失败导致误报
+        // 网络检测：仅检测网关 uid，StreamReader 完整读取，增加日志
         private bool Online()
         {
-            // 方法1：外网连通性（WinForm 源码方式）
             try
             {
-                HttpWebRequest r = (HttpWebRequest)WebRequest.Create(
-                    "http://detectportal.firefox.com/success.txt");
-                r.Timeout = 3000;
+                string url = string.Format("http://{0}/?isReback=1", _gateway);
+                HttpWebRequest r = (HttpWebRequest)WebRequest.Create(url);
+                r.Timeout = 5000;
                 using (HttpWebResponse x = (HttpWebResponse)r.GetResponse())
-                using (Stream s = x.GetResponseStream())
+                using (StreamReader sr = new StreamReader(x.GetResponseStream(), Encoding.UTF8))
                 {
-                    byte[] bf = new byte[64];
-                    int n = s.Read(bf, 0, 64);
-                    if (Encoding.ASCII.GetString(bf, 0, n).Trim() == "success")
-                        return true;
-                }
-            }
-            catch { }
-
-            // 方法2：网关 uid 检测（CampusNet(1).exe 反编译方式）
-            try
-            {
-                HttpWebRequest r = (HttpWebRequest)WebRequest.Create(
-                    string.Format("http://{0}/?isReback=1", _gateway));
-                r.Timeout = 3000;
-                using (HttpWebResponse x = (HttpWebResponse)r.GetResponse())
-                using (Stream s = x.GetResponseStream())
-                {
-                    byte[] bf = new byte[4096];
-                    int n = s.Read(bf, 0, 4096);
-                    string body = Encoding.UTF8.GetString(bf, 0, n);
+                    string body = sr.ReadToEnd();
                     Match uidMatch = Regex.Match(body, "uid='([^']*)'");
                     if (uidMatch.Success)
                     {
                         string uid = uidMatch.Groups[1].Value;
+                        AddLog(string.Format("[检测] uid={0} 在线", uid));
                         if (uid != "0" && uid != "")
                             return true;
                     }
+                    AddLog(string.Format("[检测] uid解析失败 在线"));
+                    // 没匹配到 uid 但页面正常返回，也算在线（兼容页面格式变化）
+                    return true;
                 }
             }
-            catch { }
-
-            return false;
+            catch (Exception ex)
+            {
+                AddLog(string.Format("[检测失败] {0}", ex.Message));
+                return false;
+            }
         }
 
-        // 按 CampusNet(1).exe 反编译结果重写
         // 返回 null = 成功，否则返回错误信息
         private string TryLogin(string u, string p)
         {
@@ -1621,21 +1605,18 @@ namespace CampusNetWpf
                 r.ContentType = "application/x-www-form-urlencoded";
                 r.Timeout = 10000;
                 r.ContentLength = bt.Length;
-                using (Stream s2 = r.GetRequestStream())
-                    s2.Write(bt, 0, bt.Length);
+                using (Stream s = r.GetRequestStream())
+                    s.Write(bt, 0, bt.Length);
 
                 using (HttpWebResponse x = (HttpWebResponse)r.GetResponse())
-                using (Stream s2 = x.GetResponseStream())
+                using (Stream s = x.GetResponseStream())
                 {
                     byte[] bf = new byte[4096];
-                    int n = s2.Read(bf, 0, 4096);
+                    int n = s.Read(bf, 0, 4096);
                     string body = Encoding.UTF8.GetString(bf, 0, n);
-                    // Dr.COMWebLoginID_3 表示成功
                     if (body.Contains("Dr.COMWebLoginID_3"))
                         return null;
-                    // 提取错误码 Msg=(\d+);
-                    Match msgMatch = System.Text.RegularExpressions.Regex.Match(
-                        body, "Msg=(\\d+);");
+                    Match msgMatch = Regex.Match(body, "Msg=(\\d+);");
                     if (msgMatch.Success)
                     {
                         string code = msgMatch.Groups[1].Value;
@@ -1659,10 +1640,10 @@ namespace CampusNetWpf
                 {
                     try
                     {
-                        using (Stream s2 = wex.Response.GetResponseStream())
+                        using (Stream s = wex.Response.GetResponseStream())
                         {
                             byte[] bf = new byte[4096];
-                            int n = s2.Read(bf, 0, 4096);
+                            int n = s.Read(bf, 0, 4096);
                             string body = Encoding.UTF8.GetString(bf, 0, n);
                             if (body.Contains("Dr.COMWebLoginID_3"))
                                 return null;
@@ -1678,9 +1659,14 @@ namespace CampusNetWpf
             }
         }
 
+        private bool _logging;
+        private int _offlineCount;
+        private DateTime _lastLoginSuccessTime = DateTime.MinValue;
+        private readonly object _networkLock = new object();
+
         private void RunDetection()
         {
-            // 登录或冷却期间不检测，避免密集请求干扰网关 session
+            // 登录中不检测
             if (_logging)
                 return;
             if (_detectWorker != null && _detectWorker.IsBusy)
@@ -1697,47 +1683,67 @@ namespace CampusNetWpf
                 if (e.Error == null && e.Result != null)
                     connected = (bool)e.Result;
 
-                bool previous = _isConnected;
-                _isConnected = connected;
-
-                if (!previous && connected && _autoHotspot)
+                lock (_networkLock)
                 {
-                    AddLog("网络恢复，启动热点...");
-                    ThreadPool.QueueUserWorkItem(_ => StartHotspot());
-                }
+                    bool previous = _isConnected;
 
-                if (!connected && _autoReconnect)
-                {
-                    AddLog("检测到断网!");
-                    UpdateUIState();
-                    DoLogin();
-                }
-
-                UpdateUIState();
-                if (previous && !connected)
-                {
-                    if (_notifyIcon != null)
+                    if (connected)
                     {
-                        _notifyIcon.ShowBalloonTip(
-                            3000, "苏大校园网", "网络已断开，正在尝试重连...",
-                            System.Windows.Forms.ToolTipIcon.Warning);
+                        // 在线：清零防抖计数
+                        _offlineCount = 0;
+                    }
+                    else
+                    {
+                        // 离线：累加防抖计数
+                        _offlineCount++;
+                    }
+
+                    // 只有连续 3 次检测失败，才确认真正断网
+                    if (!connected && _offlineCount >= 3 && _autoReconnect)
+                    {
+                        _isConnected = false;
+                        AddLog("确认断网，开始重连");
+                        UpdateUIState();
+                        DoLogin();
+                    }
+                    else if (!connected && _offlineCount < 3 && _autoReconnect)
+                    {
+                        AddLog(string.Format("检测失败 {0}/3", _offlineCount));
+                    }
+                    else if (connected)
+                    {
+                        _isConnected = true;
+                        if (!previous && _autoHotspot)
+                        {
+                            AddLog("网络恢复，启动热点...");
+                            ThreadPool.QueueUserWorkItem(_ => StartHotspot());
+                        }
+                        if (!previous)
+                            AddLog("[检测] 网络已恢复");
+                    }
+
+                    UpdateUIState();
+
+                    if (previous && !connected && _offlineCount >= 3)
+                    {
+                        if (_notifyIcon != null)
+                        {
+                            _notifyIcon.ShowBalloonTip(
+                                3000, "苏大校园网", "网络已断开，正在尝试重连...",
+                                System.Windows.Forms.ToolTipIcon.Warning);
+                        }
                     }
                 }
-                else if (!previous && connected)
-                    AddLog("[检测] 网络已恢复");
             };
             _detectWorker.RunWorkerAsync();
         }
 
-        private bool _logging;
-
-        // 按 CampusNet(1).exe 反编译结果重写
-        // 遍历所有启用账号，当前选中账号优先，每个试完等 2 秒再 Online() 检查
+        // 遍历所有启用账号，当前选中账号优先
+        // 登录成功后等待 5 秒再 Online 确认，避免认证服务器同步延迟
         private void DoLogin()
         {
             if (_logging) return;
 
-            // 收集所有启用的账号，当前账号排最前面
             List<int> enabledIdx = new List<int>();
             int currentIdx = -1;
             for (int i = 0; i < _accounts.Count; i++)
@@ -1772,9 +1778,15 @@ namespace CampusNetWpf
                     string result = TryLogin(acc.Username, acc.Password);
                     if (result == null)
                     {
-                        AddLog("登录成功");
-                        success = true;
-                        break;
+                        AddLog("登录成功，等待确认...");
+                        // 等待 5 秒后再次 Online 确认，避免认证服务器同步延迟
+                        System.Threading.Thread.Sleep(5000);
+                        if (Online())
+                        {
+                            success = true;
+                            break;
+                        }
+                        AddLog("登录确认失败，尝试下一个");
                     }
                     else
                     {
@@ -1794,17 +1806,22 @@ namespace CampusNetWpf
             _loginWorker.RunWorkerCompleted += (s, e) =>
             {
                 bool success = e.Result != null && (bool)e.Result;
-                if (success)
+                lock (_networkLock)
                 {
-                    _isConnected = true;
-                    UpdateUIState();
-                    AddLog("已连接!");
-                }
-                else
-                {
-                    _isConnected = false;
-                    UpdateUIState();
-                    AddLog("全部账号尝试失败");
+                    if (success)
+                    {
+                        _isConnected = true;
+                        _offlineCount = 0;
+                        _lastLoginSuccessTime = DateTime.Now;
+                        UpdateUIState();
+                        AddLog("已连接!");
+                    }
+                    else
+                    {
+                        _isConnected = false;
+                        UpdateUIState();
+                        AddLog("全部账号尝试失败");
+                    }
                 }
                 _logging = false;
             };
