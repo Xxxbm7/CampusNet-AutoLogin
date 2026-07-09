@@ -1558,8 +1558,8 @@ namespace CampusNetWpf
             _footerTime.Text = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
         }
 
-        // 网络检测：按 CampusNet(1).exe 反编译结果重写
-        // 访问 http://10.9.1.3/?isReback=1，提取 uid='...' 判断登录状态
+        // 网络检测：访问 http://10.9.1.3/?isReback=1，提取 uid 判断登录状态
+        // 修复：StreamReader.ReadToEnd() 完整读取 + KeepAlive=false + 双引号兼容
         private bool Online()
         {
             try
@@ -1567,29 +1567,30 @@ namespace CampusNetWpf
                 HttpWebRequest r = (HttpWebRequest)WebRequest.Create(
                     string.Format("http://{0}/?isReback=1", _gateway));
                 r.Timeout = 5000;
+                r.KeepAlive = false;
                 using (HttpWebResponse x = (HttpWebResponse)r.GetResponse())
-                using (Stream s = x.GetResponseStream())
+                using (StreamReader reader = new StreamReader(x.GetResponseStream(), Encoding.UTF8))
                 {
-                    byte[] bf = new byte[4096];
-                    int n = s.Read(bf, 0, 4096);
-                    string body = Encoding.UTF8.GetString(bf, 0, n);
-                    // uid='0' 或 uid='' 表示未登录，uid='账号' 表示已登录
-                    Match uidMatch = Regex.Match(body, "uid='([^']*)'");
+                    string body = reader.ReadToEnd();
+                    // 兼容单引号和双引号：uid='xxx' 或 uid="xxx"
+                    Match uidMatch = Regex.Match(body, "uid=['\"]([^'\"]*)['\"]");
                     if (uidMatch.Success)
                     {
                         string uid = uidMatch.Groups[1].Value;
-                        if (uid == "0" || uid == "")
-                            return false;
-                        return true;
+                        return !(uid == "0" || uid == "");
                     }
                     return false;
                 }
             }
-            catch { return false; }
+            catch (Exception ex)
+            {
+                AddLog("[检测异常] " + ex.Message);
+                return false;
+            }
         }
 
-        // 按 CampusNet(1).exe 反编译结果重写
         // 返回 null = 成功，否则返回错误信息
+        // 修复：StreamReader.ReadToEnd() 完整读取响应
         private string TryLogin(string u, string p)
         {
             try
@@ -1608,17 +1609,12 @@ namespace CampusNetWpf
                     s2.Write(bt, 0, bt.Length);
 
                 using (HttpWebResponse x = (HttpWebResponse)r.GetResponse())
-                using (Stream s2 = x.GetResponseStream())
+                using (StreamReader reader = new StreamReader(x.GetResponseStream(), Encoding.UTF8))
                 {
-                    byte[] bf = new byte[4096];
-                    int n = s2.Read(bf, 0, 4096);
-                    string body = Encoding.UTF8.GetString(bf, 0, n);
-                    // Dr.COMWebLoginID_3 表示成功
+                    string body = reader.ReadToEnd();
                     if (body.Contains("Dr.COMWebLoginID_3"))
                         return null;
-                    // 提取错误码 Msg=(\d+);
-                    Match msgMatch = System.Text.RegularExpressions.Regex.Match(
-                        body, "Msg=(\\d+);");
+                    Match msgMatch = Regex.Match(body, "Msg=(\\d+);");
                     if (msgMatch.Success)
                     {
                         string code = msgMatch.Groups[1].Value;
@@ -1642,11 +1638,10 @@ namespace CampusNetWpf
                 {
                     try
                     {
-                        using (Stream s2 = wex.Response.GetResponseStream())
+                        using (StreamReader reader = new StreamReader(
+                            wex.Response.GetResponseStream(), Encoding.UTF8))
                         {
-                            byte[] bf = new byte[4096];
-                            int n = s2.Read(bf, 0, 4096);
-                            string body = Encoding.UTF8.GetString(bf, 0, n);
+                            string body = reader.ReadToEnd();
                             if (body.Contains("Dr.COMWebLoginID_3"))
                                 return null;
                         }
@@ -1661,9 +1656,13 @@ namespace CampusNetWpf
             }
         }
 
+        private bool _logging;
+        private int _offlineCount = 0;
+        private const int OfflineThreshold = 2;
+
+        // 修复：增加连续失败计数阈值，避免单次误报触发无限重登
         private void RunDetection()
         {
-            // 登录过程中不检测，避免假报警
             if (_logging)
                 return;
             if (_detectWorker != null && _detectWorker.IsBusy)
@@ -1681,7 +1680,16 @@ namespace CampusNetWpf
                     connected = (bool)e.Result;
 
                 bool previous = _isConnected;
-                _isConnected = connected;
+
+                // 连续失败计数
+                if (!connected)
+                    _offlineCount++;
+                else
+                    _offlineCount = 0;
+
+                // 只有连续失败达到阈值，才确认断网
+                bool trulyOffline = (!connected && _offlineCount >= OfflineThreshold);
+                _isConnected = !trulyOffline;
 
                 if (!previous && connected && _autoHotspot)
                 {
@@ -1689,8 +1697,7 @@ namespace CampusNetWpf
                     ThreadPool.QueueUserWorkItem(_ => StartHotspot());
                 }
 
-                // 按 CampusNet(1).exe 逻辑：检测到断网就登录
-                if (!connected && _autoReconnect)
+                if (trulyOffline && _autoReconnect)
                 {
                     AddLog("检测到断网!");
                     UpdateUIState();
@@ -1698,7 +1705,8 @@ namespace CampusNetWpf
                 }
 
                 UpdateUIState();
-                if (previous && !connected)
+
+                if (previous && trulyOffline)
                 {
                     if (_notifyIcon != null)
                     {
@@ -1713,15 +1721,11 @@ namespace CampusNetWpf
             _detectWorker.RunWorkerAsync();
         }
 
-        private bool _logging;
-
-        // 按 CampusNet(1).exe 反编译结果重写
         // 遍历所有启用账号，当前选中账号优先，每个试完等 2 秒再 Online() 检查
         private void DoLogin()
         {
             if (_logging) return;
 
-            // 收集所有启用的账号，当前账号排最前面
             List<int> enabledIdx = new List<int>();
             int currentIdx = -1;
             for (int i = 0; i < _accounts.Count; i++)
@@ -1781,6 +1785,7 @@ namespace CampusNetWpf
                 if (success)
                 {
                     _isConnected = true;
+                    _offlineCount = 0;
                     UpdateUIState();
                     AddLog("已连接!");
                 }
